@@ -1,9 +1,10 @@
 from ldm_inverse.condition_methods import get_conditioning_method
 from ldm.models.diffusion.ddim import DDIMSampler
 from data.dataloader import get_dataset, get_dataloader
-from scripts.utils import clear_color, mask_generator
+from scripts.utils import clear_color, mask_generator, save_image_grid
 import matplotlib.pyplot as plt
 from ldm_inverse.measurements import get_noise, get_operator
+import torch.nn.functional as F
 from functools import partial
 import numpy as np
 from model_loader import load_model_from_config, load_yaml
@@ -116,7 +117,7 @@ sample_fn = partial(sampler.posterior_sampler, measurement_cond_fn=measurement_c
 # Working directory
 out_path = os.path.join(args.save_dir)
 os.makedirs(out_path, exist_ok=True)
-for img_dir in ['input', 'recon', 'progress', 'label']:
+for img_dir in ['input', 'recon', 'progress', 'label', 'panels']:
     os.makedirs(os.path.join(out_path, img_dir), exist_ok=True)
 
 # Prepare dataloader
@@ -148,24 +149,28 @@ for i, ref_img in enumerate(loader):
       # Forward measurement model
       y = operator_fn(ref_img)
       y_n = noiser(y)
+      y_vis = y_n
 
     else:
       y = operator.forward(ref_img)
       y_n = noiser(y).to(device)
+      y_vis = F.interpolate(y, size=ref_img.shape[-2:], mode="nearest")
 
     # Sampling
-    samples_ddim, _ = sample_fn(measurement=y_n)
+    samples_ddim, _ = sample_fn(measurement=y_n, H=ref_img.shape[-2], W=ref_img.shape[-1])
     
     x_samples_ddim = model.decode_first_stage(samples_ddim.detach())
 
     # Post-processing samples
-    label = clear_color(y_n)
+    label = clear_color(y_vis)
     reconstructed = clear_color(x_samples_ddim)
     true = clear_color(ref_img)
 
     # Saving images
     plt.imsave(os.path.join(out_path, 'input', fname+'_true.png'), true)
     plt.imsave(os.path.join(out_path, 'label', fname+'_label.png'), label)
+    save_image_grid([ref_img[0].detach().cpu(), y_vis[0].detach().cpu(), x_samples_ddim[0].detach().cpu()],
+                    os.path.join(out_path, 'panels', f'{fname}_gt_meas_recon.png'))
     plt.imsave(os.path.join(out_path, 'recon', fname+'_recon.png'), reconstructed)
 
     psnr_cur = psnr(true, reconstructed)

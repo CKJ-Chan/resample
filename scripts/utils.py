@@ -35,6 +35,22 @@ def save_image_3d(tensor, slice_idx, file_name):
     vutils.save_image(image_grid, file_name, nrow=1)
 
 
+def save_image_grid(tensors, path):
+    """Save a horizontal grid of tensors to ``path``.
+
+    Each tensor is expected to be ``(C,H,W)`` in ``[-1,1]`` or ``[0,1]``. All
+    tensors are converted to ``[0,1]`` and concatenated along width.
+    """
+    ts = []
+    for t in tensors:
+        if t.min() < 0:
+            t = (t + 1) / 2.0
+        ts.append(t.clamp(0, 1))
+    grid = torch.cat(ts, dim=-1)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    vutils.save_image(grid, path)
+
+
 
 def map_coordinates(input, coordinates):
     ''' PyTorch version of scipy.ndimage.interpolation.map_coordinates

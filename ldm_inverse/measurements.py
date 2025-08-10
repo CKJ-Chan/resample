@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from functools import partial
 import yaml
 from torch.nn import functional as F
-from torchvision import torch
+import torch
 from motionblur.motionblur import Kernel
 import numpy as np
 
@@ -45,6 +45,10 @@ class LinearOperator(ABC):
     def transpose(self, data, **kwargs):
         # calculate A^T * X
         pass
+
+    # alias so other code can call A.adjoint(...)
+    def adjoint(self, data, **kwargs):
+        return self.transpose(data, **kwargs)
     
     def ortho_project(self, data, **kwargs):
         # calculate (I - A^T * A)X
@@ -157,6 +161,97 @@ class InpaintingOperator(LinearOperator):
     
     def ortho_project(self, data, **kwargs):
         return data - self.forward(data, **kwargs)
+
+
+# Center-tile sampling operator
+
+@register_operator(name='center_tile_sampling')
+class CenterTileSamplingOperator(LinearOperator):
+    """
+    A: split into s×s tiles; sample geometric centre.
+       - odd s: exact centre pixel
+       - even s: bilinear at the geometric centre (half-pixel)
+    forward: (B,C,H,W) -> (B,C,H//s,W//s)
+    transpose/adjoint: back-project with matching (bi)linear weights
+    """
+    def __init__(self, s, device, in_shape=None):
+        self.s = int(s)
+        self.device = device
+        self.in_shape = in_shape
+
+    def _centres_hw(self, H, W, device):
+        s = self.s
+        h, w = H // s, W // s
+        i = torch.arange(h, device=device).float().view(1,1,h,1)
+        j = torch.arange(w, device=device).float().view(1,1,1,w)
+        yc = i * s + (s - 1) / 2.0
+        xc = j * s + (s - 1) / 2.0
+        return yc, xc
+
+    def forward(self, data, **kwargs):
+        x = data.to(self.device)
+        B, C, H, W = x.shape
+        s = self.s
+        assert H % s == 0 and W % s == 0, "H,W must be divisible by s"
+        yc, xc = self._centres_hw(H, W, x.device)
+        yc = yc.expand(B, 1, H // s, W // s)
+        xc = xc.expand(B, 1, H // s, W // s)
+
+        if s % 2 == 1:
+            yi = yc.long(); xi = xc.long()
+            b = torch.arange(B, device=x.device)[:, None, None, None]
+            c = torch.arange(C, device=x.device)[None, :, None, None]
+            return x[b, c, yi.expand(B,C,H//s,W//s), xi.expand(B,C,H//s,W//s)]
+
+        x0 = torch.floor(xc).long().clamp(max=W-1); x1 = (x0 + 1).clamp(max=W-1)
+        y0 = torch.floor(yc).long().clamp(max=H-1); y1 = (y0 + 1).clamp(max=H-1)
+        wx = xc - x0.float(); wy = yc - y0.float()
+
+        b = torch.arange(B, device=x.device)[:, None, None, None]
+        c = torch.arange(C, device=x.device)[None, :, None, None]
+
+        def gather(ix, iy):
+            return x[b, c, iy.expand(B,C,H//s,W//s), ix.expand(B,C,H//s,W//s)]
+
+        v00 = gather(x0, y0)
+        v01 = gather(x0, y1)
+        v10 = gather(x1, y0)
+        v11 = gather(x1, y1)
+
+        return (1-wx)*(1-wy)*v00 + (1-wx)*wy*v01 + wx*(1-wy)*v10 + wx*wy*v11
+
+    def transpose(self, data, **kwargs):
+        y = data.to(self.device)
+        H = kwargs.get('H'); W = kwargs.get('W')
+        if H is None or W is None:
+            if self.in_shape is not None: _, _, H, W = self.in_shape
+            else: H, W = y.shape[-2] * self.s, y.shape[-1] * self.s
+
+        B, C, h, w = y.shape
+        x_bp = torch.zeros(B, C, H, W, device=y.device)
+        yc, xc = self._centres_hw(H, W, y.device)
+        yc = yc.expand(B, 1, h, w); xc = xc.expand(B, 1, h, w)
+
+        b = torch.arange(B, device=y.device)[:, None, None, None]
+        c = torch.arange(C, device=y.device)[None, :, None, None]
+
+        if self.s % 2 == 1:
+            yi = yc.long(); xi = xc.long()
+            x_bp.index_put_((b.expand(B,C,h,w), c.expand(B,C,h,w), yi.expand(B,C,h,w), xi.expand(B,C,h,w)), y, accumulate=True)
+            return x_bp
+
+        x0 = torch.floor(xc).long().clamp(max=W-1); x1 = (x0 + 1).clamp(max=W-1)
+        y0 = torch.floor(yc).long().clamp(max=H-1); y1 = (y0 + 1).clamp(max=H-1)
+        wx = xc - x0.float(); wy = yc - y0.float()
+
+        def add_at(ix, iy, weight):
+            x_bp.index_put_((b.expand(B,C,h,w), c.expand(B,C,h,w), iy.expand(B,C,h,w), ix.expand(B,C,h,w)), (y * weight).to(y.dtype), accumulate=True)
+
+        add_at(x0, y0, (1-wx)*(1-wy))
+        add_at(x0, y1, (1-wx)*wy)
+        add_at(x1, y0, wx*(1-wy))
+        add_at(x1, y1, wx*wy)
+        return x_bp
 
 
 class NonLinearOperator(ABC):
