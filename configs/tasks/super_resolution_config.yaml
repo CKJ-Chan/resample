@@ -6,7 +6,7 @@ conditioning:
 
 data:
   name: ffhq
-  root: ./data/samples/
+  root: ./data/super_resolution/train
 
 measurement:
   operator:
