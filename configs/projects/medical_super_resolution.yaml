@@ -1,0 +1,25 @@
+# Overrides for training the latent diffusion model on custom
+# medical super-resolution data prepared with
+# ``scripts/prepare_super_resolution_dataset.py``.
+
+data:
+  params:
+    batch_size: 8
+    num_workers: 4
+    train:
+      target: taming.data.custom.CustomTrain
+      params:
+        size: 256
+        training_images_list_file: data/super_resolution/train_images.txt
+    validation:
+      target: taming.data.custom.CustomTest
+      params:
+        size: 256
+        test_images_list_file: data/super_resolution/test_images.txt
+
+lightning:
+  trainer:
+    max_epochs: 100
+    precision: 16
+    accelerator: gpu
+    devices: 1
